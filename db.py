@@ -1,12 +1,13 @@
 # db.py
 """Supabase persistence layer with auth, budgets, and transaction editing.
 
-IMPORTANT: Do NOT decorate load_transactions() or load_budgets() with
-@st.cache_data. Streamlit's cache_data is keyed only by function arguments
-and is shared across ALL user sessions. Since these functions take no
-user-identifying argument, caching them would serve one user's rows to
-another. Queries to Supabase are fast enough that skipping the cache is
-the correct choice for a multi-user app.
+IMPORTANT:
+1. Do NOT decorate load_transactions() or load_budgets() with @st.cache_data.
+   cache_data is shared across sessions and would leak data between users.
+2. Every write operation re-attaches the user's JWT before the query, because
+   Supabase access tokens expire (default 1 hour) and the PostgREST client
+   caches the last-attached token. Without re-attaching, writes can silently
+   affect 0 rows while returning 200 OK.
 """
 import os
 import streamlit as st
@@ -19,7 +20,7 @@ from supabase import create_client
 # ------------------------------------------------------------------
 @st.cache_resource
 def get_client():
-    """Return a Supabase client (resource cache is safe — no user data inside)."""
+    """Return a Supabase client. Safe to cache — it holds no user data."""
     try:
         url = st.secrets.get("SUPABASE_URL")
         key = st.secrets.get("SUPABASE_KEY")
@@ -33,24 +34,47 @@ def get_client():
 
 
 def _authed_client():
-    """Return client with the current user's JWT attached (so RLS applies)."""
+    """
+    Return a Supabase client with the current user's JWT freshly attached.
+
+    Re-attaching on every call is important:
+    - The Supabase Python client caches the last auth token on the postgrest
+      sub-client. If we only set it once at login, the token may expire and
+      the client will keep sending the stale token.
+    - When the token is stale, PostgREST treats the request as `anon`.
+      RLS blocks the row, and DELETE/UPDATE reports success but affects 0 rows.
+    """
     client = get_client()
     if client is None:
         return None
+
     token = st.session_state.get("access_token")
-    if token:
+    if not token:
+        return None
+
+    try:
+        # Refresh the session if we can; this updates the access_token in place
+        # if the refresh_token is still valid.
         try:
-            client.postgrest.auth(token)
+            session = client.auth.get_session()
+            if session and session.access_token:
+                token = session.access_token
+                st.session_state["access_token"] = token
         except Exception:
+            # Refresh failed — keep using the existing token and hope it's valid.
             pass
-    return client
+
+        client.postgrest.auth(token)
+        return client
+    except Exception as e:
+        st.error(f"Failed to attach auth token: {e}")
+        return None
 
 
 # ------------------------------------------------------------------
 # Auth
 # ------------------------------------------------------------------
 def sign_in(email: str, password: str):
-    """Sign in with email + password. Returns (success, message)."""
     client = get_client()
     if client is None:
         return False, "Supabase not configured."
@@ -67,7 +91,6 @@ def sign_in(email: str, password: str):
 
 
 def sign_out():
-    """Clear the current session."""
     client = get_client()
     if client:
         try:
@@ -86,7 +109,6 @@ def current_user():
 # Transactions
 # ------------------------------------------------------------------
 def save_transactions(df: pd.DataFrame, source: str = "mpesa") -> int:
-    """Upsert transactions for the current user. Returns count sent."""
     client = _authed_client()
     user = current_user()
     if client is None or user is None:
@@ -115,6 +137,11 @@ def save_transactions(df: pd.DataFrame, source: str = "mpesa") -> int:
     for i in range(0, len(rows), BATCH):
         batch = rows[i:i + BATCH]
         try:
+            # Re-attach JWT for every batch in case it changed mid-loop
+            client = _authed_client()
+            if client is None:
+                st.warning(f"Auth lost mid-upload at batch {i}. Stopping.")
+                break
             client.table("mpesa_transactions").upsert(
                 batch, on_conflict="user_id,receipt,txn_date"
             ).execute()
@@ -125,11 +152,6 @@ def save_transactions(df: pd.DataFrame, source: str = "mpesa") -> int:
 
 
 def load_transactions() -> pd.DataFrame:
-    """
-    Load all transactions for the currently logged-in user.
-
-    NOTE: No @st.cache_data here on purpose. See module docstring.
-    """
     client = _authed_client()
     if client is None:
         return pd.DataFrame()
@@ -148,7 +170,6 @@ def load_transactions() -> pd.DataFrame:
 
 
 def update_transaction(receipt: str, txn_date: str, updates: dict) -> bool:
-    """Update one transaction. RLS ensures only the owner can."""
     client = _authed_client()
     if client is None:
         return False
@@ -163,7 +184,6 @@ def update_transaction(receipt: str, txn_date: str, updates: dict) -> bool:
 
 
 def delete_transaction(receipt: str, txn_date: str) -> bool:
-    """Delete one transaction. RLS ensures only the owner can."""
     client = _authed_client()
     if client is None:
         return False
@@ -177,27 +197,135 @@ def delete_transaction(receipt: str, txn_date: str) -> bool:
         return False
 
 
-def delete_all() -> bool:
-    """Delete every transaction for the current user."""
+def count_transactions() -> int:
+    """Return the number of transactions for the current user."""
     client = _authed_client()
     if client is None:
-        return False
+        return -1
     try:
-        client.table("mpesa_transactions").delete().neq("receipt", "").execute()
-        return True
+        resp = client.table("mpesa_transactions").select("id", count="exact").execute()
+        return resp.count or 0
     except Exception:
-        return False
+        return -1
+
+
+def delete_all() -> tuple[bool, str]:
+    """
+    Delete every transaction for the current user.
+
+    Uses a fresh JWT-attached client, verifies the delete actually removed
+    rows, and reports exactly how many rows were affected.
+    """
+    user = current_user()
+    if user is None:
+        return False, "Not signed in."
+
+    # Count before
+    before = count_transactions()
+    if before < 0:
+        return False, "Could not count rows before delete. Check your session."
+    if before == 0:
+        return True, "Nothing to delete."
+
+    # Delete — MUST use a freshly authed client
+    client = _authed_client()
+    if client is None:
+        return False, "Auth token missing. Please log out and log in again."
+
+    try:
+        resp = (
+            client.table("mpesa_transactions")
+            .delete()
+            .eq("user_id", user["id"])
+            .execute()
+        )
+    except Exception as e:
+        return False, f"Delete request failed: {e}"
+
+    # Count after
+    after = count_transactions()
+    if after < 0:
+        return False, f"Delete sent but could not verify. Before={before}."
+
+    deleted = before - after
+
+    if deleted == 0:
+        return False, (
+            f"Delete returned success but affected 0 rows. "
+            f"Likely an expired auth token. "
+            f"Log out and log in again, then retry."
+        )
+    if after == 0:
+        return True, f"Deleted all {deleted} transactions."
+    return True, f"Deleted {deleted} of {before} transactions. {after} remain."
+
+
+def delete_by_range(from_date_iso: str, to_date_iso: str) -> tuple[bool, str]:
+    """
+    Delete transactions in a date range for the current user.
+    Dates are ISO strings (YYYY-MM-DD), inclusive.
+    """
+    user = current_user()
+    if user is None:
+        return False, "Not signed in."
+
+    client = _authed_client()
+    if client is None:
+        return False, "Auth token missing. Please log out and log in again."
+
+    # Count matching rows first
+    try:
+        before = (
+            client.table("mpesa_transactions")
+            .select("id", count="exact")
+            .eq("user_id", user["id"])
+            .gte("txn_date", from_date_iso)
+            .lte("txn_date", to_date_iso)
+            .execute()
+        )
+        count_before = before.count or 0
+    except Exception as e:
+        return False, f"Count failed: {e}"
+
+    if count_before == 0:
+        return True, "No transactions in that range."
+
+    # Delete
+    try:
+        client.table("mpesa_transactions").delete().eq(
+            "user_id", user["id"]
+        ).gte("txn_date", from_date_iso).lte("txn_date", to_date_iso).execute()
+    except Exception as e:
+        return False, f"Delete failed: {e}"
+
+    # Verify
+    try:
+        after = (
+            client.table("mpesa_transactions")
+            .select("id", count="exact")
+            .eq("user_id", user["id"])
+            .gte("txn_date", from_date_iso)
+            .lte("txn_date", to_date_iso)
+            .execute()
+        )
+        count_after = after.count or 0
+    except Exception:
+        count_after = -1
+
+    deleted = count_before - count_after
+
+    if deleted <= 0:
+        return False, (
+            f"Delete affected 0 rows out of {count_before}. "
+            f"Likely an expired auth token."
+        )
+    return True, f"Deleted {deleted} transactions in range."
 
 
 # ------------------------------------------------------------------
 # Budgets
 # ------------------------------------------------------------------
 def load_budgets(month_key: str) -> dict:
-    """
-    Return {category: budget_amount} for a given month for the current user.
-
-    NOTE: No @st.cache_data here on purpose. See module docstring.
-    """
     client = _authed_client()
     if client is None:
         return {}
@@ -209,7 +337,6 @@ def load_budgets(month_key: str) -> dict:
 
 
 def save_budget(category: str, month_key: str, amount: float) -> bool:
-    """Upsert a single budget for the current user."""
     client = _authed_client()
     user = current_user()
     if client is None or user is None:

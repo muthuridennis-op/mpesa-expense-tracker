@@ -195,7 +195,7 @@ pages = [
     st.Page("pages/9_Budgets.py", title="Budgets", icon="🎯"),
     st.Page("pages/10_Sankey.py", title="Money Flow", icon="🌊"),
     st.Page("pages/11_Report.py", title="Report", icon="📄"),
-    st.Page("pages/13_settings.py", title="Settings", icon="⚙️"),
+    st.Page("pages/13_Settings.py", title="Settings", icon="⚙️"),
 ]
 
 pg = st.navigation(pages)
