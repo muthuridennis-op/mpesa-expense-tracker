@@ -41,16 +41,31 @@ st.markdown(
 # ------------------------------------------------------------------
 if current_user() is None:
     st.title("🔒 M-Pesa Expense Tracker")
-    st.caption("Sign in to access your data.")
+    st.caption("Sign in to access your data. Press Enter after your password.")
 
-    with st.form("login"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Password", type="password", key="login_password")
 
-        if submitted:
+    # Submit button (primary path)
+    clicked = st.button("Sign in", use_container_width=True, type="primary")
+
+    # Enter-to-submit:
+    # Streamlit reruns when you press Enter in a text_input.
+    # We debounce with a session key so we don't re-attempt on every rerun.
+    submitted_by_enter = False
+    if email and password:
+        last = st.session_state.get("_last_login_attempt", ("", ""))
+        if (email, password) != last:
+            st.session_state["_last_login_attempt"] = (email, password)
+            submitted_by_enter = True
+
+    if clicked or submitted_by_enter:
+        if not email or not password:
+            st.warning("Please enter both email and password.")
+        else:
             ok, msg = sign_in(email, password)
             if ok:
+                st.session_state.pop("_last_login_attempt", None)
                 st.rerun()
             else:
                 st.error(f"Login failed: {msg}")
@@ -67,7 +82,12 @@ with st.sidebar:
         type=["pdf"],
         accept_multiple_files=True,
     )
-    password = st.text_input("PDF password (if required)", type="password")
+    pdf_password = st.text_input(
+        "PDF password (if required)",
+        type="password",
+        key="pdf_password",
+        help="The code Safaricom emailed you. Press Enter to apply.",
+    )
 
     st.divider()
     st.header("⚙️ Settings")
@@ -91,15 +111,23 @@ with st.sidebar:
 
 # ------------------------------------------------------------------
 # Parse & save
+# Signature now includes the PDF password, so pressing Enter
+# in the password field re-triggers parsing.
 # ------------------------------------------------------------------
 if uploaded_files:
-    signature = ",".join(sorted(f.name for f in uploaded_files))
+    signature = (
+        ",".join(sorted(f.name for f in uploaded_files))
+        + f"|{pdf_password or ''}"
+    )
+
     if st.session_state.get("last_file") != signature:
         all_dfs = []
         failed = []
         for f in uploaded_files:
             try:
-                text = extract_text_from_pdf(f.read(), password or None)
+                # Rewind the file pointer in case it was read before
+                f.seek(0)
+                text = extract_text_from_pdf(f.read(), pdf_password or None)
                 part = parse_mpesa_text(text)
                 if part.empty:
                     failed.append(f.name)
@@ -109,11 +137,14 @@ if uploaded_files:
                 failed.append(f"{f.name}: {e}")
 
         if not all_dfs:
-            st.error("No transactions parsed from any uploaded PDF.")
+            st.error(
+                "No transactions parsed from any uploaded PDF. "
+                "Check the password, or the file may be a scanned image."
+            )
             if failed:
-                st.write("Failed files:")
-                for f in failed:
-                    st.write(f"- {f}")
+                with st.expander("Failed files"):
+                    for f in failed:
+                        st.write(f"- {f}")
             st.stop()
 
         merged = pd.concat(all_dfs, ignore_index=True)
@@ -138,7 +169,10 @@ if "df" not in st.session_state:
 
 raw_df = st.session_state["df"]
 if raw_df is None or raw_df.empty:
-    st.info("👈 Upload a PDF statement to get started. Transactions are saved automatically.")
+    st.info(
+        "👈 Upload a PDF statement to get started. "
+        "Transactions are saved automatically."
+    )
     st.stop()
 
 working_df = filter_by_month(raw_df, month_filter)
@@ -161,7 +195,7 @@ pages = [
     st.Page("pages/9_Budgets.py", title="Budgets", icon="🎯"),
     st.Page("pages/10_Sankey.py", title="Money Flow", icon="🌊"),
     st.Page("pages/11_Report.py", title="Report", icon="📄"),
-    st.Page("pages/13_settings.py", title="Settings", icon="⚙️"),
+    st.Page("pages/13_Settings.py", title="Settings", icon="⚙️"),
 ]
 
 pg = st.navigation(pages)
