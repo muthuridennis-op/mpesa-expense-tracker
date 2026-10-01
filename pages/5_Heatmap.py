@@ -1,6 +1,7 @@
 # pages/5_Heatmap.py
 import streamlit as st
 import plotly.express as px
+from ui_helpers import is_compact
 
 st.title("🗓️ Spending Heatmap")
 
@@ -23,7 +24,7 @@ agg = daily.groupby(["month", "dow", "week"])["abs_amount"].sum().reset_index()
 
 fig = px.density_heatmap(
     agg, x="week", y="dow", z="abs_amount",
-    facet_col="month", facet_col_wrap=3,
+    facet_col="month", facet_col_wrap=2 if is_compact() else 3,
     color_continuous_scale="Reds",
     labels={"abs_amount": "Spent (KES)", "week": "Week", "dow": "Day"},
 )
@@ -31,5 +32,8 @@ fig.update_yaxes(
     tickmode="array", tickvals=[0, 1, 2, 3, 4, 5, 6],
     ticktext=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
 )
-fig.update_layout(template="plotly_dark", height=500)
+fig.update_layout(
+    template="plotly_dark",
+    height=400 if is_compact() else 500,
+)
 st.plotly_chart(fig, use_container_width=True)

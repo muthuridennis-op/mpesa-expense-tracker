@@ -2,6 +2,7 @@
 import streamlit as st
 import plotly.graph_objects as go
 from analytics.metrics import compute_summary
+from ui_helpers import is_compact, metric_row
 
 st.title("📈 Overview")
 
@@ -12,11 +13,12 @@ if df is None or df.empty:
 
 summary = compute_summary(df)
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Income (KES)", f"{summary['income']:,.0f}")
-col2.metric("Expenses (KES)", f"{abs(summary['expenses']):,.0f}")
-col3.metric("Net Savings (KES)", f"{summary['net']:,.0f}")
-col4.metric("Savings Rate", f"{summary['savings_rate']:.1f}%")
+metric_row([
+    ("Income (KES)", f"{summary['income']:,.0f}"),
+    ("Expenses (KES)", f"{abs(summary['expenses']):,.0f}"),
+    ("Net Savings (KES)", f"{summary['net']:,.0f}"),
+    ("Savings Rate", f"{summary['savings_rate']:.1f}%"),
+])
 
 st.divider()
 
@@ -34,7 +36,8 @@ fig.add_trace(go.Scatter(
     mode="lines+markers", line=dict(color="#1f77b4", width=2), yaxis="y2",
 ))
 fig.update_layout(
-    template="plotly_dark", height=450,
+    template="plotly_dark",
+    height=300 if is_compact() else 450,
     yaxis=dict(title="Daily Net (KES)"),
     yaxis2=dict(title="Cumulative (KES)", overlaying="y", side="right"),
     legend=dict(orientation="h", y=1.1),

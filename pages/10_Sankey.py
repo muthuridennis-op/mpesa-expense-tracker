@@ -1,6 +1,7 @@
 # pages/10_Sankey.py
 import streamlit as st
 import plotly.graph_objects as go
+from ui_helpers import is_compact
 
 st.title("🌊 Money Flow")
 st.caption("How income flows into and out of your M-Pesa wallet.")
@@ -54,7 +55,8 @@ fig = go.Figure(go.Sankey(
     link=dict(source=sources, target=targets, value=values, color=colors),
 ))
 fig.update_layout(
-    template="plotly_dark", height=600,
+    template="plotly_dark",
+    height=450 if is_compact() else 600,
     title_text="Income sources → Wallet → Expense categories",
 )
 st.plotly_chart(fig, use_container_width=True)

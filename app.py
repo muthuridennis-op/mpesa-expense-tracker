@@ -8,6 +8,7 @@ import pandas as pd
 
 from parsers.mpesa import extract_text_from_pdf, parse_mpesa_text
 from analytics.metrics import filter_by_month
+from db import save_transactions, load_transactions
 
 st.set_page_config(
     page_title="Expense Tracker",
@@ -16,11 +17,33 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------------
-# Sidebar: upload, password, month filter
+# Mobile viewport + small-screen tweaks
+# ------------------------------------------------------------------
+st.markdown(
+    """
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <style>
+        @media (max-width: 640px) {
+            .stDataFrame { font-size: 12px !important; }
+            .stMetric label { font-size: 11px !important; }
+            .stMetric div[data-testid="stMetricValue"] { font-size: 18px !important; }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ------------------------------------------------------------------
+# Sidebar: upload, password, month filter, compact mode
 # ------------------------------------------------------------------
 with st.sidebar:
     st.header("📄 Upload Statement")
-    uploaded_file = st.file_uploader("PDF statement", type=["pdf"])
+    uploaded_files = st.file_uploader(
+        "PDF statement(s)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload multiple statements at once. Duplicates by receipt number are removed automatically.",
+    )
     password = st.text_input("PDF password (if required)", type="password")
 
     st.divider()
@@ -29,41 +52,69 @@ with st.sidebar:
         "Filter by month",
         ["All", "This month", "Last month", "Last 3 months"],
     )
+    compact = st.toggle(
+        "📱 Compact mode",
+        value=False,
+        help="Optimized for phone screens — single column, larger text.",
+    )
+    st.session_state["compact"] = compact
+
     st.divider()
     st.caption("M-Pesa statements are usually 6 months long.")
 
 
 # ------------------------------------------------------------------
-# Parse & cache into session_state
+# Parse & save to Supabase
 # ------------------------------------------------------------------
-if uploaded_file is not None:
-    if st.session_state.get("last_file") != uploaded_file.name:
-        try:
-            text = extract_text_from_pdf(uploaded_file.read(), password or None)
-        except Exception as e:
-            st.error(f"Could not open PDF: {e}")
+if uploaded_files:
+    signature = ",".join(sorted(f.name for f in uploaded_files))
+    if st.session_state.get("last_file") != signature:
+        all_dfs = []
+        failed = []
+        for f in uploaded_files:
+            try:
+                text = extract_text_from_pdf(f.read(), password or None)
+                part = parse_mpesa_text(text)
+                if part.empty:
+                    failed.append(f.name)
+                else:
+                    all_dfs.append(part)
+            except Exception as e:
+                failed.append(f"{f.name}: {e}")
+
+        if not all_dfs:
+            st.error("No transactions parsed from any uploaded PDF.")
+            if failed:
+                st.write("Failed files:")
+                for f in failed:
+                    st.write(f"- {f}")
             st.stop()
 
-        df = parse_mpesa_text(text)
-        if df.empty:
-            st.warning(
-                "No transactions detected. Check the password, or the PDF "
-                "layout may differ from the standard M-Pesa format."
-            )
-            with st.expander("🔍 Show raw extracted text (first 2000 chars)"):
-                st.text(text[:2000])
-            st.stop()
+        merged = pd.concat(all_dfs, ignore_index=True)
+        merged = merged.drop_duplicates(subset=["receipt"], keep="first")
+        merged = merged.sort_values("date").reset_index(drop=True)
 
-        st.session_state["df"] = df
-        st.session_state["last_file"] = uploaded_file.name
+        n = save_transactions(merged, source="mpesa")
+        if n:
+            st.success(f"Saved {n} transactions to the database.")
+
+        # Reload everything from the database
+        st.session_state["df"] = load_transactions()
+        st.session_state["last_file"] = signature
+
+        if failed:
+            st.warning(f"Skipped {len(failed)} file(s): {', '.join(failed)}")
 
 
 # ------------------------------------------------------------------
-# Load, filter, store working df
+# Load from database on first visit
 # ------------------------------------------------------------------
-raw_df = st.session_state.get("df")
+if "df" not in st.session_state:
+    st.session_state["df"] = load_transactions()
+
+raw_df = st.session_state["df"]
 if raw_df is None or raw_df.empty:
-    st.info("👈 Upload a PDF statement from the sidebar to get started.")
+    st.info("👈 Upload a PDF statement to get started. Transactions are saved automatically.")
     st.stop()
 
 working_df = filter_by_month(raw_df, month_filter)
@@ -76,6 +127,7 @@ st.session_state["working_df"] = working_df
 pages = [
     st.Page("pages/1_Overview.py", title="Overview", icon="📈", default=True),
     st.Page("pages/2_Categories.py", title="Categories", icon="🥧"),
+    st.Page("pages/12_Payees.py", title="Payees", icon="👥"),
     st.Page("pages/3_Top_Spenders.py", title="Top Spenders", icon="🏆"),
     st.Page("pages/4_Explorer.py", title="Explorer", icon="🔍"),
     st.Page("pages/5_Heatmap.py", title="Heatmap", icon="🗓️"),
@@ -85,6 +137,7 @@ pages = [
     st.Page("pages/9_Budgets.py", title="Budgets", icon="🎯"),
     st.Page("pages/10_Sankey.py", title="Money Flow", icon="🌊"),
     st.Page("pages/11_Report.py", title="Report", icon="📄"),
+    st.Page("pages/13_Settings.py", title="Settings", icon="⚙️"),
 ]
 
 pg = st.navigation(pages)

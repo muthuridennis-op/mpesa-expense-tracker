@@ -19,6 +19,30 @@ TX_START = re.compile(
 )
 
 
+PAYEE_PATTERNS = [
+    # "Pay Bill Fuliza M-Pesa to 888880 - KPLC PREPAID Acc. 92800589548"
+    (re.compile(r"to\s+\d+\s*-\s*(.+?)(?:\s+Acc\.|\s+Account|$)", re.IGNORECASE), 1),
+    # Charges — no payee
+    (re.compile(r"^(Pay Bill Charge|Customer Transfer of Funds Charge|Withdrawal Charge)$", re.IGNORECASE), None),
+    # "Merchant Payment to 7644189 - Naivas"
+    (re.compile(r"Merchant Payment to \d+\s*-\s*(.+?)$", re.IGNORECASE), 1),
+    # "Buy Goods from 123456 - Quickmart"
+    (re.compile(r"Buy Goods from \d+\s*-\s*(.+?)$", re.IGNORECASE), 1),
+    # "Customer Transfer Fuliza MPesa to - 254722***831 ROSEFRIDAH MAKENA"
+    (re.compile(r"Customer Transfer(?: Fuliza MPesa)? to\s*-\s*\d+\*+\d+\s+(.+?)(?:\s+\||$)", re.IGNORECASE), 1),
+    # "Funds received from - 254722***831 ROSEFRIDAH MAKENA"
+    (re.compile(r"Funds received from\s*-\s*\d+\*+\d+\s+(.+?)(?:\s+\||$)", re.IGNORECASE), 1),
+    # Bundle/Data purchases
+    (re.compile(r"(?:Bundle Purchase|Data Bundles)\s+(?:with Fuliza )?(?:to|by)\s+\S+\s*-?\s*(.+?)(?:\s+\||$)", re.IGNORECASE), 1),
+    # "Agent Deposit" / "Agent Withdrawal"
+    (re.compile(r"Agent (Deposit|Withdrawal)", re.IGNORECASE), 1),
+    # "OD Loan Repayment"
+    (re.compile(r"OD Loan Repayment", re.IGNORECASE), None),
+    # "M-Shwari" fallback
+    (re.compile(r"(M-?Shwari)", re.IGNORECASE), 1),
+]
+
+
 def extract_text_from_pdf(file_bytes: bytes, password: str | None = None) -> str:
     """Extract all text from a PDF, optionally password-protected."""
     parts = []
@@ -57,6 +81,19 @@ def classify_type(details: str) -> str:
     if "m-shwari" in d or "mshwari" in d:
         return "M-Shwari"
     return "Other"
+
+
+def extract_payee(details: str) -> str:
+    """Best-effort extraction of a payee/merchant name from details."""
+    for pattern, group in PAYEE_PATTERNS:
+        m = pattern.search(details)
+        if m:
+            if group is None:
+                return ""
+            value = m.group(group).strip()
+            value = re.sub(r"\s+", " ", value).strip(" -|.")
+            return value[:60]
+    return ""
 
 
 def parse_mpesa_text(text: str) -> pd.DataFrame:
@@ -103,6 +140,7 @@ def parse_mpesa_text(text: str) -> pd.DataFrame:
     df = df.dropna(subset=["date", "amount"])
     df = df[df["status"] == "Completed"].copy()
     df["type"] = df["details"].apply(classify_type)
+    df["payee"] = df["details"].apply(extract_payee)
     df = df[df["type"] != "Fuliza OverDraft"].copy()
 
     return _group_by_receipt(df).sort_values("date").reset_index(drop=True)
@@ -120,6 +158,7 @@ def _group_by_receipt(df: pd.DataFrame) -> pd.DataFrame:
         main_idx = max(range(len(amounts)), key=lambda i: abs(amounts[i]))
         main_amount = amounts[main_idx]
         main_type = group["type"].iloc[main_idx]
+        main_payee = group["payee"].iloc[main_idx] if "payee" in group.columns else ""
         charge_total = sum(a for i, a in enumerate(amounts) if i != main_idx)
 
         out.append({
@@ -131,6 +170,7 @@ def _group_by_receipt(df: pd.DataFrame) -> pd.DataFrame:
             "charge": charge_total,
             "net_amount": main_amount + charge_total,
             "type": main_type,
+            "payee": main_payee,
             "status": status,
         })
 

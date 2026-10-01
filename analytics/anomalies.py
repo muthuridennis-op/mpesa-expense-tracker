@@ -1,9 +1,13 @@
 # analytics/anomalies.py
-"""Detect unusually large transactions per category."""
+"""Detect unusually large transactions per category using IQR."""
 import pandas as pd
 
 
-def find_anomalies(df: pd.DataFrame, z_threshold: float = 2.0) -> pd.DataFrame:
+def find_anomalies(df: pd.DataFrame, iqr_multiplier: float = 2.0) -> pd.DataFrame:
+    """
+    Flag transactions that fall above Q3 + multiplier * IQR within their category.
+    IQR = Q3 - Q1. More robust to outliers than z-score.
+    """
     expenses = df[df["net_amount"] < 0].copy()
     if expenses.empty:
         return pd.DataFrame()
@@ -11,23 +15,30 @@ def find_anomalies(df: pd.DataFrame, z_threshold: float = 2.0) -> pd.DataFrame:
     expenses["abs_amount"] = expenses["net_amount"].abs()
     rows = []
     for txn_type, group in expenses.groupby("type"):
-        if len(group) < 3:
+        if len(group) < 4:
             continue
-        mean = group["abs_amount"].mean()
-        std = group["abs_amount"].std()
-        if std == 0 or pd.isna(std):
+        q1 = group["abs_amount"].quantile(0.25)
+        q3 = group["abs_amount"].quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
             continue
-        threshold = mean + z_threshold * std
-        for _, row in group[group["abs_amount"] > threshold].iterrows():
+        upper = q3 + iqr_multiplier * iqr
+        for _, row in group[group["abs_amount"] > upper].iterrows():
             rows.append({
                 "date": row["date"],
                 "type": txn_type,
+                "payee": row.get("payee", ""),
                 "details": row["details"][:80],
                 "amount": row["abs_amount"],
-                "category_mean": mean,
-                "z_score": (row["abs_amount"] - mean) / std,
+                "category_q3": q3,
+                "category_iqr": iqr,
+                "multiple_of_iqr": (row["abs_amount"] - q3) / iqr,
             })
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values("z_score", ascending=False).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values("multiple_of_iqr", ascending=False)
+        .reset_index(drop=True)
+    )
