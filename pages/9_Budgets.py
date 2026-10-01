@@ -1,16 +1,14 @@
 # pages/9_Budgets.py
 import streamlit as st
+from db import load_budgets, save_budget
 
 st.title("🎯 Budgets")
-st.caption("Set monthly targets per category. Progress resets each month.")
+st.caption("Set a monthly budget per category. Saved to the database.")
 
 df = st.session_state.get("working_df")
 if df is None or df.empty:
     st.info("No data.")
     st.stop()
-
-if "budgets" not in st.session_state:
-    st.session_state.budgets = {}
 
 expenses = df[df["net_amount"] < 0].copy()
 if expenses.empty:
@@ -19,21 +17,42 @@ if expenses.empty:
 
 expenses["abs_amount"] = expenses["net_amount"].abs()
 expenses["month_str"] = expenses["date"].dt.strftime("%Y-%m")
-current_month = sorted(expenses["month_str"].unique())[-1]
-st.caption(f"Showing budgets for **{current_month}**")
-month_exp = expenses[expenses["month_str"] == current_month]
+
+months = sorted(expenses["month_str"].unique(), reverse=True)
+selected_month = st.selectbox("Budget month", months)
+month_exp = expenses[expenses["month_str"] == selected_month]
+
+saved = load_budgets(selected_month)
+
+st.divider()
 
 categories = sorted(expenses["type"].unique())
 for cat in categories:
     spent = month_exp[month_exp["type"] == cat]["abs_amount"].sum()
-    default_budget = st.session_state.budgets.get(cat, 5000.0)
-    budget = st.number_input(
-        f"{cat} budget (KES)",
-        min_value=0.0, value=float(default_budget), step=500.0,
-        key=f"budget_{cat}",
-    )
-    st.session_state.budgets[cat] = budget
+    current = saved.get(cat, 0.0)
 
-    if budget > 0:
-        progress = min(spent / budget, 1.0)
-        st.progress(progress, text=f"{spent:,.0f} / {budget:,.0f} KES")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f"**{cat}** — spent {spent:,.0f} KES")
+        if current > 0:
+            progress = min(spent / current, 1.0)
+            st.progress(progress, text=f"{spent:,.0f} / {current:,.0f} KES")
+    with col2:
+        new_budget = st.number_input(
+            "Budget (KES)",
+            min_value=0.0,
+            value=float(current),
+            step=500.0,
+            key=f"budget_{selected_month}_{cat}",
+            label_visibility="collapsed",
+        )
+        if new_budget != current:
+            if save_budget(cat, selected_month, new_budget):
+                st.toast(f"Saved {cat} budget")
+
+st.divider()
+total_budget = sum(load_budgets(selected_month).values())
+total_spent = month_exp["abs_amount"].sum()
+st.metric("Total budget", f"{total_budget:,.0f} KES")
+st.metric("Total spent", f"{total_spent:,.0f} KES")
+st.metric("Remaining", f"{total_budget - total_spent:,.0f} KES")

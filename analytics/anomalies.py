@@ -4,10 +4,6 @@ import pandas as pd
 
 
 def find_anomalies(df: pd.DataFrame, iqr_multiplier: float = 2.0) -> pd.DataFrame:
-    """
-    Flag transactions that fall above Q3 + multiplier * IQR within their category.
-    IQR = Q3 - Q1. More robust to outliers than z-score.
-    """
     expenses = df[df["net_amount"] < 0].copy()
     if expenses.empty:
         return pd.DataFrame()

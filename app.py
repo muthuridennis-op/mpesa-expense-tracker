@@ -1,5 +1,5 @@
 # app.py
-"""M-Pesa & Bank Statement Expense Tracker — entrypoint."""
+"""M-Pesa & Bank Statement Expense Tracker — entrypoint with auth."""
 import io
 from datetime import datetime
 
@@ -8,7 +8,10 @@ import pandas as pd
 
 from parsers.mpesa import extract_text_from_pdf, parse_mpesa_text
 from analytics.metrics import filter_by_month
-from db import save_transactions, load_transactions
+from db import (
+    get_client, sign_in, sign_out, current_user,
+    save_transactions, load_transactions,
+)
 
 st.set_page_config(
     page_title="Expense Tracker",
@@ -34,7 +37,28 @@ st.markdown(
 )
 
 # ------------------------------------------------------------------
-# Sidebar: upload, password, month filter, compact mode
+# Authentication gate
+# ------------------------------------------------------------------
+if current_user() is None:
+    st.title("🔒 M-Pesa Expense Tracker")
+    st.caption("Sign in to access your data.")
+
+    with st.form("login"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+        if submitted:
+            ok, msg = sign_in(email, password)
+            if ok:
+                st.rerun()
+            else:
+                st.error(f"Login failed: {msg}")
+
+    st.stop()
+
+# ------------------------------------------------------------------
+# Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
     st.header("📄 Upload Statement")
@@ -42,7 +66,6 @@ with st.sidebar:
         "PDF statement(s)",
         type=["pdf"],
         accept_multiple_files=True,
-        help="Upload multiple statements at once. Duplicates by receipt number are removed automatically.",
     )
     password = st.text_input("PDF password (if required)", type="password")
 
@@ -52,19 +75,22 @@ with st.sidebar:
         "Filter by month",
         ["All", "This month", "Last month", "Last 3 months"],
     )
-    compact = st.toggle(
-        "📱 Compact mode",
-        value=False,
-        help="Optimized for phone screens — single column, larger text.",
-    )
+    compact = st.toggle("📱 Compact mode", value=False)
     st.session_state["compact"] = compact
+
+    st.divider()
+    user = current_user()
+    if user:
+        st.caption(f"Signed in as **{user['email']}**")
+        if st.button("Log out", use_container_width=True):
+            sign_out()
+            st.rerun()
 
     st.divider()
     st.caption("M-Pesa statements are usually 6 months long.")
 
-
 # ------------------------------------------------------------------
-# Parse & save to Supabase
+# Parse & save
 # ------------------------------------------------------------------
 if uploaded_files:
     signature = ",".join(sorted(f.name for f in uploaded_files))
@@ -98,16 +124,14 @@ if uploaded_files:
         if n:
             st.success(f"Saved {n} transactions to the database.")
 
-        # Reload everything from the database
         st.session_state["df"] = load_transactions()
         st.session_state["last_file"] = signature
 
         if failed:
             st.warning(f"Skipped {len(failed)} file(s): {', '.join(failed)}")
 
-
 # ------------------------------------------------------------------
-# Load from database on first visit
+# Load from database
 # ------------------------------------------------------------------
 if "df" not in st.session_state:
     st.session_state["df"] = load_transactions()
@@ -119,7 +143,6 @@ if raw_df is None or raw_df.empty:
 
 working_df = filter_by_month(raw_df, month_filter)
 st.session_state["working_df"] = working_df
-
 
 # ------------------------------------------------------------------
 # Navigation
@@ -133,6 +156,7 @@ pages = [
     st.Page("pages/5_Heatmap.py", title="Heatmap", icon="🗓️"),
     st.Page("pages/6_Anomalies.py", title="Anomalies", icon="🚨"),
     st.Page("pages/7_Recurring.py", title="Recurring", icon="🔁"),
+    st.Page("pages/14_Forecast.py", title="Forecast", icon="🔮"),
     st.Page("pages/8_Compare.py", title="Compare", icon="📊"),
     st.Page("pages/9_Budgets.py", title="Budgets", icon="🎯"),
     st.Page("pages/10_Sankey.py", title="Money Flow", icon="🌊"),
