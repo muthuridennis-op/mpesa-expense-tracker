@@ -1,24 +1,22 @@
 # analytics/recurring.py
-"""Detect recurring monthly payments using fuzzy payee matching."""
+"""Detect recurring monthly payments.
+
+Changes vs the first version:
+  * internal movements are excluded
+  * median gap (robust to one-off outliers) instead of mean gap
+  * token_sort_ratio clustering, so "John" no longer merges into "John Kamau"
+  * an ``active`` flag, so subscriptions you stopped months ago are not counted
+  * returns the matching ``receipts`` so the Forecast can exclude exactly them
+"""
 import pandas as pd
-from rapidfuzz import fuzz
 
+from analytics.common import cluster_names, ensure_enriched, spending
 
-def _cluster_payees(payees: list[str], threshold: int = 85) -> dict:
-    reps = []
-    mapping = {}
-    for payee in payees:
-        matched = None
-        for rep in reps:
-            if fuzz.token_set_ratio(payee.lower(), rep.lower()) >= threshold:
-                matched = rep
-                break
-        if matched is None:
-            reps.append(payee)
-            mapping[payee] = payee
-        else:
-            mapping[payee] = matched
-    return mapping
+COLUMNS = [
+    "cluster", "category", "sample_payees", "occurrences", "avg_amount",
+    "amount_cv", "avg_gap_days", "last_paid", "next_expected", "total_paid",
+    "active", "receipts",
+]
 
 
 def find_recurring(
@@ -26,49 +24,57 @@ def find_recurring(
     min_gap: int = 25,
     max_gap: int = 35,
     amount_tolerance: float = 0.25,
-    fuzzy_threshold: int = 85,
+    fuzzy_threshold: int = 88,
+    min_occurrences: int = 3,
 ) -> pd.DataFrame:
-    expenses = df[df["net_amount"] < 0].copy()
-    if expenses.empty:
-        return pd.DataFrame()
+    d = spending(df)
+    if d.empty:
+        return pd.DataFrame(columns=COLUMNS)
 
-    expenses["abs_amount"] = expenses["net_amount"].abs()
-    expenses["group_key"] = expenses.apply(
-        lambda r: r.get("payee") if r.get("payee") else r["details"][:40],
-        axis=1,
-    )
+    all_df = ensure_enriched(df)
+    data_end = all_df["date"].max()
 
-    unique_keys = expenses["group_key"].dropna().unique().tolist()
-    mapping = _cluster_payees(unique_keys, threshold=fuzzy_threshold)
-    expenses["cluster"] = expenses["group_key"].map(mapping).fillna(expenses["group_key"])
+    # group key: cleaned payee, falling back to the first 40 chars of details
+    payee = d["payee_clean"].fillna("")
+    d["group_key"] = payee.where(payee != "", d["details"].fillna("").str[:40])
+    mapping = cluster_names(tuple(sorted(d["group_key"].unique())), fuzzy_threshold)
+    d["cluster"] = d["group_key"].map(mapping).fillna(d["group_key"])
 
     rows = []
-    for cluster, group in expenses.groupby("cluster"):
-        if len(group) < 3:
+    for cluster, group in d.groupby("cluster"):
+        if not cluster or len(group) < min_occurrences:
             continue
         group = group.sort_values("date")
         gaps = group["date"].diff().dt.days.dropna()
-        if len(gaps) == 0:
+        if gaps.empty:
             continue
-        avg_gap = gaps.mean()
-        if not (min_gap <= avg_gap <= max_gap):
+        median_gap = float(gaps.median())
+        if not (min_gap <= median_gap <= max_gap):
             continue
         amounts = group["abs_amount"]
-        if amounts.mean() == 0:
+        mean = amounts.mean()
+        if mean == 0:
             continue
-        cv = amounts.std() / amounts.mean()
-        if cv < amount_tolerance:
-            rows.append({
-                "cluster": cluster,
-                "sample_payees": " | ".join(group["group_key"].unique()[:3]),
-                "occurrences": len(group),
-                "avg_amount": amounts.mean(),
-                "amount_cv": cv,
-                "avg_gap_days": avg_gap,
-                "next_expected": group["date"].max() + pd.Timedelta(days=int(avg_gap)),
-                "total_paid": amounts.sum(),
-            })
+        cv = amounts.std() / mean
+        if cv >= amount_tolerance:
+            continue
+
+        last_paid = group["date"].max()
+        rows.append({
+            "cluster": cluster,
+            "category": group["category"].mode().iloc[0],
+            "sample_payees": " | ".join(group["group_key"].unique()[:3]),
+            "occurrences": len(group),
+            "avg_amount": float(mean),
+            "amount_cv": float(cv),
+            "avg_gap_days": median_gap,
+            "last_paid": last_paid,
+            "next_expected": last_paid + pd.Timedelta(days=int(round(median_gap))),
+            "total_paid": float(amounts.sum()),
+            "active": bool((data_end - last_paid).days <= median_gap * 1.5),
+            "receipts": group["receipt"].tolist(),
+        })
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=COLUMNS)
     return pd.DataFrame(rows).sort_values("total_paid", ascending=False).reset_index(drop=True)

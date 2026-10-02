@@ -1,25 +1,24 @@
 # pages/6_Anomalies.py
 import streamlit as st
+
 from analytics.anomalies import find_anomalies
+from ui_helpers import get_df, show_df
 
 st.title("🚨 Anomalies")
-st.caption("Unusually large transactions within each category (IQR method).")
+st.caption("Unusually large expenses within each category (IQR method). Internal movements are excluded.")
 
-df = st.session_state.get("working_df")
-if df is None or df.empty:
-    st.info("No data.")
-    st.stop()
-
+df = get_df()
 multiplier = st.slider("Sensitivity (lower = more sensitive)", 1.0, 4.0, 2.0, 0.5)
-anom_df = find_anomalies(df, iqr_multiplier=multiplier)
+anom = find_anomalies(df, iqr_multiplier=multiplier)
 
-if anom_df.empty:
+if anom.empty:
     st.success("✅ No unusual transactions detected at this sensitivity.")
 else:
-    st.warning(f"⚠️ {len(anom_df)} unusual transactions detected")
-    st.dataframe(
-        anom_df, use_container_width=True, hide_index=True,
+    st.warning(f"⚠️ {len(anom)} unusual transactions detected")
+    show_df(
+        anom,
         column_config={
+            "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
             "amount": st.column_config.NumberColumn("Amount", format="%.2f"),
             "category_q3": st.column_config.NumberColumn("Category Q3", format="%.2f"),
             "category_iqr": st.column_config.NumberColumn("IQR", format="%.2f"),

@@ -1,61 +1,51 @@
 # pages/2_Categories.py
-import streamlit as st
 import plotly.express as px
-from ui_helpers import is_compact
+import streamlit as st
+
+from analytics.categories import UNCATEGORISED
+from analytics.common import spending
+from ui_helpers import cols, get_df, is_compact, show_chart, show_df
 
 st.title("🥧 Categories")
 
-df = st.session_state.get("working_df")
-if df is None or df.empty:
-    st.info("No data.")
-    st.stop()
-
-expense_df = df[df["net_amount"] < 0].copy()
-if expense_df.empty:
+df = get_df()
+exp = spending(df)
+if exp.empty:
     st.info("No expenses in this period.")
     st.stop()
 
-expense_df["abs_amount"] = expense_df["net_amount"].abs()
 cat = (
-    expense_df.groupby("type")["abs_amount"]
-    .sum().sort_values(ascending=False).reset_index()
+    exp.groupby("category")["abs_amount"].agg(total="sum", count="count")
+    .sort_values("total", ascending=False).reset_index()
 )
+cat["share_%"] = (cat["total"] / cat["total"].sum() * 100).round(1)
+
+unc = float(cat.loc[cat["category"] == UNCATEGORISED, "total"].sum())
+if unc / cat["total"].sum() > 0.25:
+    st.info(
+        f"{unc / cat['total'].sum():.0%} of spending is still “{UNCATEGORISED}”. "
+        "Open **Category Rules** to label your top payees; every chart gets better."
+    )
 
 st.subheader("Click a bar to drill into transactions")
-
-fig = px.bar(
-    cat, x="type", y="abs_amount",
-    color="abs_amount", color_continuous_scale="Reds",
-)
-fig.update_layout(template="plotly_dark", height=300 if is_compact() else 400)
-event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+fig = px.bar(cat, x="category", y="total", color="total", color_continuous_scale="Reds")
+fig.update_layout(height=300 if is_compact() else 400, xaxis_title="", yaxis_title="KES")
+event = show_chart(fig, on_select="rerun", key="cat_chart")
 
 st.divider()
-
-if is_compact():
+left, right = cols(2)
+with left:
     st.subheader("Expense Breakdown")
-    pie = px.pie(cat, values="abs_amount", names="type", hole=0.4)
-    pie.update_layout(template="plotly_dark")
-    st.plotly_chart(pie, use_container_width=True)
+    pie = px.pie(cat, values="total", names="category", hole=0.4)
+    show_chart(pie)
+with right:
     st.subheader("Category Totals")
-    st.dataframe(cat, use_container_width=True, hide_index=True)
-else:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Expense Breakdown")
-        pie = px.pie(cat, values="abs_amount", names="type", hole=0.4)
-        pie.update_layout(template="plotly_dark")
-        st.plotly_chart(pie, use_container_width=True)
-    with col2:
-        st.subheader("Category Totals")
-        st.dataframe(cat, use_container_width=True, hide_index=True)
+    show_df(cat)
 
-if event and event.get("selection", {}).get("points"):
-    clicked = event["selection"]["points"][0]["x"]
+points = (event or {}).get("selection", {}).get("points") if event else None
+if points:
+    clicked = points[0]["x"]
     st.divider()
     st.subheader(f"Transactions in **{clicked}**")
-    drill = expense_df[expense_df["type"] == clicked].sort_values("abs_amount", ascending=False)
-    st.dataframe(
-        drill[["date", "details", "payee", "abs_amount"]],
-        use_container_width=True, hide_index=True,
-    )
+    drill = exp[exp["category"] == clicked].sort_values("abs_amount", ascending=False)
+    show_df(drill[["date", "details", "payee_clean", "type", "abs_amount"]])

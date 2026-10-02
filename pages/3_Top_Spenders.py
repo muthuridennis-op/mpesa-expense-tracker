@@ -1,45 +1,33 @@
 # pages/3_Top_Spenders.py
-import streamlit as st
+"""Individual big-ticket items. (Totals per payee live on the Payees page.)"""
 import plotly.express as px
-from ui_helpers import is_compact
+import streamlit as st
+
+from analytics.common import spending
+from ui_helpers import get_df, is_compact, show_chart, show_df
 
 st.title("🏆 Top Spenders")
 
-df = st.session_state.get("working_df")
-if df is None or df.empty:
-    st.info("No data.")
-    st.stop()
-
-expense_df = df[df["net_amount"] < 0].copy()
-if expense_df.empty:
+df = get_df()
+exp = spending(df)
+if exp.empty:
     st.info("No expenses.")
     st.stop()
 
-expense_df["abs_amount"] = expense_df["net_amount"].abs()
-
 st.subheader("Largest individual transactions")
-top_txns = (
-    expense_df.nlargest(10, "abs_amount")
-    [["date", "details", "payee", "type", "abs_amount"]]
-    .rename(columns={"abs_amount": "amount_kes"})
+top = (
+    exp.nlargest(15, "abs_amount")[["date", "details", "payee_clean", "category", "abs_amount"]]
+    .rename(columns={"abs_amount": "amount_kes", "payee_clean": "payee"})
 )
-st.dataframe(top_txns, use_container_width=True, hide_index=True)
+show_df(top)
 
 st.divider()
-st.subheader("Top payees (aggregated)")
-
-group_col = "payee" if expense_df["payee"].astype(bool).any() else "details"
-by_payee = (
-    expense_df[expense_df[group_col] != ""]
-    .groupby(group_col)["abs_amount"]
-    .sum().sort_values(ascending=False).head(15).reset_index()
+st.subheader("Biggest spending days")
+by_day = (
+    exp.groupby(exp["date"].dt.normalize())["abs_amount"].agg(total="sum", transactions="count")
+    .sort_values("total", ascending=False).head(10).reset_index()
 )
-fig = px.bar(
-    by_payee.sort_values("abs_amount"),
-    x="abs_amount", y=group_col, orientation="h",
-)
-fig.update_layout(
-    template="plotly_dark",
-    height=350 if is_compact() else 500,
-)
-st.plotly_chart(fig, use_container_width=True)
+fig = px.bar(by_day.sort_values("total"), x="total", y=by_day.sort_values("total")["date"].dt.strftime("%Y-%m-%d"),
+             orientation="h", hover_data=["transactions"], labels={"total": "KES", "y": "Day"})
+fig.update_layout(height=350 if is_compact() else 450, yaxis_title="")
+show_chart(fig)

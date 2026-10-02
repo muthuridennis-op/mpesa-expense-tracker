@@ -1,0 +1,13 @@
+# secrets
+.streamlit/secrets.toml
+.env
+*.env
+# personal data: statements contain names, numbers and balances
+*.pdf
+*.csv
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

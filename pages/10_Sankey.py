@@ -1,62 +1,62 @@
 # pages/10_Sankey.py
-import streamlit as st
 import plotly.graph_objects as go
-from ui_helpers import is_compact
+import streamlit as st
+
+from analytics.common import income, spending
+from ui_helpers import get_df, is_compact, show_chart
 
 st.title("🌊 Money Flow")
-st.caption("How income flows into and out of your M-Pesa wallet.")
+st.caption("Real income → wallet → spending by category. Internal movements are excluded.")
 
-df = st.session_state.get("working_df")
-if df is None or df.empty:
-    st.info("No data.")
-    st.stop()
-
-income_df = df[df["net_amount"] > 0].copy()
-expense_df = df[df["net_amount"] < 0].copy()
-
-if income_df.empty and expense_df.empty:
+df = get_df()
+inc, exp = income(df), spending(df)
+if inc.empty and exp.empty:
     st.info("No flows to display.")
     st.stop()
 
-expense_df["abs_amount"] = expense_df["net_amount"].abs()
+TOP_N = 10
 
 
-def simplify_income(d: str) -> str:
-    d = d.lower()
-    if "funds received" in d or "received from" in d:
-        return "Received from people"
-    if "agent deposit" in d or "deposit" in d:
-        return "Agent deposit"
-    return "Other income"
+def top_with_other(series, n=TOP_N):
+    series = series.sort_values(ascending=False)
+    if len(series) <= n:
+        return series
+    head = series.iloc[:n].copy()
+    head["Other"] = series.iloc[n:].sum()
+    return head
 
 
-income_df["source"] = income_df["details"].apply(simplify_income)
+in_groups = top_with_other(inc.groupby("category")["net_amount"].sum()) if not inc.empty else {}
+out_groups = top_with_other(exp.groupby("category")["abs_amount"].sum()) if not exp.empty else {}
+total_in, total_out = float(sum(in_groups.values)) if len(in_groups) else 0.0, float(sum(out_groups.values)) if len(out_groups) else 0.0
 
-income_groups = income_df.groupby("source")["net_amount"].sum().reset_index()
-expense_groups = expense_df.groupby("type")["abs_amount"].sum().reset_index()
+# unique node keys, so an "Uncategorised" income and expense never collide
+labels, index = ["Wallet"], {"wallet": 0}
 
-labels = ["Wallet"] + income_groups["source"].tolist() + expense_groups["type"].tolist()
-idx = {label: i for i, label in enumerate(labels)}
 
-sources, targets, values, colors = [], [], [], []
-for _, row in income_groups.iterrows():
-    sources.append(idx[row["source"]])
-    targets.append(idx["Wallet"])
-    values.append(row["net_amount"])
-    colors.append("#2ca02c")
-for _, row in expense_groups.iterrows():
-    sources.append(idx["Wallet"])
-    targets.append(idx[row["type"]])
-    values.append(row["abs_amount"])
-    colors.append("#d62728")
+def node(key, label):
+    if key not in index:
+        index[key] = len(labels)
+        labels.append(label)
+    return index[key]
+
+
+src, tgt, val, col = [], [], [], []
+for cat, v in (in_groups.items() if len(in_groups) else []):
+    src.append(node(("in", cat), f"{cat} (in)")); tgt.append(0); val.append(float(v)); col.append("rgba(44,160,44,0.4)")
+for cat, v in (out_groups.items() if len(out_groups) else []):
+    src.append(0); tgt.append(node(("out", cat), cat)); val.append(float(v)); col.append("rgba(214,39,40,0.4)")
+
+# balance the wallet so it does not look leaky
+gap = total_in - total_out
+if gap > 0:
+    src.append(0); tgt.append(node("gap", "Saved / unspent")); val.append(gap); col.append("rgba(31,119,180,0.4)")
+elif gap < 0:
+    src.append(node("gap", "Drawn from balance")); tgt.append(0); val.append(-gap); col.append("rgba(255,127,14,0.4)")
 
 fig = go.Figure(go.Sankey(
-    node=dict(label=labels, pad=20, thickness=20, color="#444"),
-    link=dict(source=sources, target=targets, value=values, color=colors),
+    node=dict(label=labels, pad=20, thickness=20),
+    link=dict(source=src, target=tgt, value=val, color=col),
 ))
-fig.update_layout(
-    template="plotly_dark",
-    height=450 if is_compact() else 600,
-    title_text="Income sources → Wallet → Expense categories",
-)
-st.plotly_chart(fig, use_container_width=True)
+fig.update_layout(height=450 if is_compact() else 600, title_text="Income → Wallet → Spending")
+show_chart(fig)

@@ -1,141 +1,125 @@
 # pages/4_Explorer.py
 import streamlit as st
-from ui_helpers import is_compact
-from db import update_transaction, delete_transaction
+
+from db import delete_transaction, update_transaction
+from parsers.mpesa import KNOWN_TYPES
+from ui_helpers import cols, flash, get_df, show_df, show_flash, sk
 
 st.title("🔍 Transaction Explorer")
+show_flash()
 
-df = st.session_state.get("working_df")
-if df is None or df.empty:
-    st.info("No data.")
-    st.stop()
+all_df = get_df(use_filter=False)  # editing must find any transaction, whatever the filter
 
-mode = st.radio(
-    "Mode",
-    ["View & filter", "Find & edit by receipt"],
-    horizontal=True,
-)
+mode = st.radio("Mode", ["View & filter", "Find & edit by receipt"], horizontal=True)
 
-# ============ View & filter mode ============
+# ============ View & filter ============
 if mode == "View & filter":
-    if is_compact():
-        search = st.text_input("Search description or receipt", "")
-        types = ["All"] + sorted(df["type"].unique().tolist())
-        type_filter = st.multiselect("Types", types, default=["All"])
-        direction = st.radio("Direction", ["All", "Income", "Expense"], horizontal=True)
-        amt_min = float(df["net_amount"].min())
-        amt_max = float(df["net_amount"].max())
-        amt_range = st.slider("Amount range (KES)", amt_min, amt_max, (amt_min, amt_max))
+    df = st.session_state.get("working_df")
+    if df is None or df.empty:
+        st.info("No transactions for the current month filter.")
+        st.stop()
+
+    c1, c2, c3 = cols(3)
+    search = c1.text_input("Search description, payee or receipt", "")
+    types = sorted(t for t in df["type"].unique() if t)
+    type_filter = c2.multiselect("Types (empty = all)", types)
+    categories = sorted(df["category"].unique())
+    cat_filter = c3.multiselect("Categories (empty = all)", categories)
+
+    d1, d2, d3 = cols(3)
+    direction = d1.radio("Direction", ["All", "Income", "Expense"], horizontal=True)
+    hide_internal = d2.checkbox("Hide internal movements", value=False)
+    lo, hi = float(df["net_amount"].min()), float(df["net_amount"].max())
+    if lo < hi:
+        amt_range = d3.slider("Amount range (KES)", lo, hi, (lo, hi))
     else:
-        fcol1, fcol2, fcol3, fcol4 = st.columns([2, 2, 2, 2])
-        with fcol1:
-            search = st.text_input("Search description or receipt", "")
-        with fcol2:
-            types = ["All"] + sorted(df["type"].unique().tolist())
-            type_filter = st.multiselect("Types", types, default=["All"])
-        with fcol3:
-            direction = st.radio("Direction", ["All", "Income", "Expense"], horizontal=True)
-        with fcol4:
-            amt_min = float(df["net_amount"].min())
-            amt_max = float(df["net_amount"].max())
-            amt_range = st.slider("Amount range (KES)", amt_min, amt_max, (amt_min, amt_max))
+        amt_range = (lo, hi)
 
-    filtered = df.copy()
+    f = df.copy()
     if search:
-        filtered = filtered[
-            filtered["details"].str.contains(search, case=False, na=False)
-            | filtered["receipt"].str.contains(search, case=False, na=False)
-            | filtered["payee"].str.contains(search, case=False, na=False)
+        s = search.strip()
+        f = f[
+            f["details"].str.contains(s, case=False, na=False, regex=False)
+            | f["receipt"].str.contains(s, case=False, na=False, regex=False)
+            | f["payee"].str.contains(s, case=False, na=False, regex=False)
+            | f["payee_clean"].str.contains(s, case=False, na=False, regex=False)
         ]
-    if type_filter and "All" not in type_filter:
-        filtered = filtered[filtered["type"].isin(type_filter)]
+    if type_filter:
+        f = f[f["type"].isin(type_filter)]
+    if cat_filter:
+        f = f[f["category"].isin(cat_filter)]
     if direction != "All":
-        filtered = filtered[filtered["direction"] == direction]
-    filtered = filtered[
-        (filtered["net_amount"] >= amt_range[0])
-        & (filtered["net_amount"] <= amt_range[1])
-    ]
+        f = f[f["direction"] == direction]
+    if hide_internal:
+        f = f[~f["is_internal"]]
+    f = f[(f["net_amount"] >= amt_range[0]) & (f["net_amount"] <= amt_range[1])]
 
-    st.caption(
-        f"Showing **{len(filtered)}** of {len(df)} transactions · "
-        f"Total: **{filtered['net_amount'].sum():,.2f} KES**"
-    )
+    st.caption(f"Showing **{len(f)}** of {len(df)} transactions · Total: **{f['net_amount'].sum():,.2f} KES**")
 
-    st.dataframe(
-        filtered[["date", "time", "details", "payee", "type", "net_amount", "direction"]]
-        .sort_values("date", ascending=False),
-        use_container_width=True, hide_index=True,
+    show_cols = ["date", "time", "details", "payee_clean", "type", "category", "net_amount", "direction", "is_internal"]
+    show_df(
+        f[show_cols].sort_values("date", ascending=False),
         column_config={
             "net_amount": st.column_config.NumberColumn("Amount (KES)", format="%.2f"),
             "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+            "payee_clean": "Payee",
         },
     )
+    export = f[["date", "time", "receipt", "details", "payee_clean", "type", "category",
+                "amount", "charge", "net_amount", "direction", "is_internal"]]
+    st.download_button("⬇️ Download filtered transactions", export.to_csv(index=False).encode("utf-8"),
+                       file_name="mpesa_filtered.csv", mime="text/csv")
 
-    csv = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download filtered transactions",
-        csv, file_name="mpesa_filtered.csv", mime="text/csv",
-    )
-
-# ============ Find & edit mode ============
+# ============ Find & edit ============
 else:
     st.subheader("Find a transaction by receipt number")
-    search_receipt = st.text_input("Receipt number (or partial)", "").strip().upper()
+    q = st.text_input("Receipt number (or partial)", "").strip().upper()
 
-    if search_receipt:
-        matches = df[df["receipt"].str.upper().str.contains(search_receipt, na=False)]
+    if q:
+        matches = all_df[all_df["receipt"].str.upper().str.contains(q, na=False, regex=False)]
         if matches.empty:
             st.warning("No transaction found with that receipt.")
-        else:
-            st.dataframe(
-                matches[["date", "details", "payee", "type", "net_amount"]],
-                use_container_width=True, hide_index=True,
-            )
+            st.stop()
 
-            selected_receipt = st.selectbox(
-                "Select a receipt to edit", matches["receipt"].tolist()
-            )
-            row = matches[matches["receipt"] == selected_receipt].iloc[0]
+        show_df(matches[["date", "details", "payee", "type", "category", "net_amount"]])
+        selected = st.selectbox("Select a receipt to edit", matches["receipt"].tolist())
+        row = matches[matches["receipt"] == selected].iloc[0]
+        txn_date = str(row["date"].date())
 
-            with st.form("edit_txn"):
-                st.text_input("Receipt", value=row["receipt"], disabled=True)
-                st.text_input("Date", value=str(row["date"].date()), disabled=True)
-                new_payee = st.text_input("Payee", value=row.get("payee", ""))
-                type_options = [
-                    "Paybill", "Paybill Charge", "Merchant", "Transfer", "Transfer Charge",
-                    "Withdrawal", "Withdrawal Charge", "Deposit", "Received",
-                    "Data/Airtime", "M-Shwari", "Fuliza Repayment", "Other",
-                ]
-                current_type = row["type"] if row["type"] in type_options else "Other"
-                new_type = st.selectbox(
-                    "Type", type_options,
-                    index=type_options.index(current_type),
-                )
-                new_details = st.text_area("Details", value=row.get("details", ""), height=80)
+        type_options = list(dict.fromkeys(KNOWN_TYPES + sorted(t for t in all_df["type"].unique() if t)))
+        if row["type"] and row["type"] not in type_options:
+            type_options.append(row["type"])
 
-                saved = st.form_submit_button("💾 Save changes", use_container_width=True)
+        with st.form("edit_txn"):
+            st.text_input("Receipt", value=row["receipt"], disabled=True)
+            st.text_input("Date", value=txn_date, disabled=True)
+            new_payee = st.text_input("Payee", value=row["payee"] or "")
+            current_type = row["type"] if row["type"] in type_options else "Other"
+            new_type = st.selectbox("Type", type_options, index=type_options.index(current_type))
+            new_details = st.text_area("Details", value=row["details"] or "", height=80)
+            saved = st.form_submit_button("💾 Save changes", **sk("form_submit_button"))
 
-                if saved:
-                    ok = update_transaction(
-                        receipt=row["receipt"],
-                        txn_date=str(row["date"].date()),
-                        updates={
-                            "payee": new_payee,
-                            "txn_type": new_type,
-                            "details": new_details,
-                        },
-                    )
-                    if ok:
-                        st.success("Saved. Refresh to see the update.")
-                        st.session_state.pop("df", None)
-                        st.rerun()
-                    else:
-                        st.error("Save failed.")
+        if saved:
+            # only send fields that actually changed (never silently overwrite the rest)
+            updates = {}
+            if new_payee != (row["payee"] or ""):
+                updates["payee"] = new_payee
+            if new_type != row["type"]:
+                updates["txn_type"] = new_type
+            if new_details != (row["details"] or ""):
+                updates["details"] = new_details
+            if not updates:
+                st.info("Nothing changed.")
+            elif update_transaction(row["receipt"], txn_date, updates):
+                flash("Saved.")
+                st.session_state.pop("df", None)
+                st.rerun()
 
-            st.divider()
-            st.caption("⚠️ Deleting is permanent.")
-            if st.button("🗑️ Delete this transaction", type="secondary"):
-                if delete_transaction(row["receipt"], str(row["date"].date())):
-                    st.success("Deleted.")
-                    st.session_state.pop("df", None)
-                    st.rerun()
+        st.divider()
+        st.caption("⚠️ Deleting is permanent.")
+        confirm = st.checkbox("I understand this deletes the transaction", key=f"confirm_del_{selected}")
+        if st.button("🗑️ Delete this transaction", disabled=not confirm, **sk("button")):
+            if delete_transaction(row["receipt"], txn_date):
+                flash("Deleted.")
+                st.session_state.pop("df", None)
+                st.rerun()
